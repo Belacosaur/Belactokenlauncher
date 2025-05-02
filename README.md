@@ -1,4 +1,4 @@
-"""# ✨ Belactokenlauncher ✨
+# ✨ Belac Token Launcher ✨
 
 A Solana smart contract for launching SPL tokens via a bonding curve mechanism, built with native Rust and SPL.
 
@@ -72,4 +72,4 @@ This smart contract is provided "as is" without warranty of any kind. It has **n
 
 ## 📜 License
 
-This project is licensed under the [**INSERT LICENSE HERE**] License. (E.g., MIT, Apache 2.0). Please add a `LICENSE` file to the repository root. 
+This project is licensed under the [**OBELISK PROTOCOL**] License.
