@@ -41,6 +41,32 @@ impl Processor {
         match instruction {
             TokenLaunchInstruction::CreateTokenAndBondingCurve(args) => {
                 msg!("Instruction: CreateTokenAndBondingCurve");
+                // Log the unpacked arguments IMMEDIATELY after unpack
+                msg!("Unpacked Create Args - Name: {}", args.name);
+                msg!("Unpacked Create Args - Symbol: {}", args.symbol);
+                msg!("Unpacked Create Args - URI: {}", args.metadata_uri);
+                msg!("Unpacked Create Args - Market Cap SOL: {}", args.market_cap_threshold_sol);
+                msg!("Unpacked Create Args - Initial Virtual SOL: {}", args.initial_virtual_sol_reserves);
+                msg!("Unpacked Create Args - Initial Virtual Token: {}", args.initial_virtual_token_reserves);
+                msg!("Unpacked Create Args - Trade Fee BPS: {}", args.trade_fee_basis_points);
+                msg!("Unpacked Create Args - Creator Fee BPS: {}", args.creator_fee_basis_points);
+
+                // === ADDING ARGUMENT VALIDATION ===
+                // If these are zero, it means deserialization likely failed, despite matching schemas.
+                // We expect non-zero values based on frontend logic.
+                if args.initial_virtual_sol_reserves == 0 {
+                    msg!("Validation Error: Unpacked initial_virtual_sol_reserves is zero!");
+                    return Err(ProgramError::InvalidArgument);
+                }
+                if args.initial_virtual_token_reserves == 0 {
+                    msg!("Validation Error: Unpacked initial_virtual_token_reserves is zero!");
+                    return Err(ProgramError::InvalidArgument);
+                }
+                 // Allow zero creator fee, but trade fee should generally be non-zero if set
+                 // Let's assume trade_fee > 0 was sent if it's non-zero in the form
+                 // (Add more specific checks if needed based on form validation)
+                 // For now, focus on reserves which MUST be non-zero.
+
                 Self::process_create_token_and_bonding_curve(program_id, accounts, args)
             }
             TokenLaunchInstruction::BuyToken(args) => {
@@ -62,11 +88,221 @@ impl Processor {
         }
     }
 
+    /// Helper function to perform CPI calls for account creation and initialization
+    fn create_and_initialize_accounts<'a>(
+        program_id: &Pubkey,
+        payer_creator_account: &AccountInfo<'a>,
+        config_account: &AccountInfo<'a>,
+        token_mint_account: &AccountInfo<'a>,
+        sol_vault_account: &AccountInfo<'a>,
+        token_vault_account: &AccountInfo<'a>,
+        metadata_account: &AccountInfo<'a>,
+        system_program_account: &AccountInfo<'a>,
+        token_program_account: &AccountInfo<'a>,
+        metadata_program_account: &AccountInfo<'a>,
+        rent_sysvar_account: &AccountInfo<'a>,
+        config_pda: &Pubkey,
+        config_signer_seeds: &[&[u8]],
+        sol_vault_signer_seeds: &[&[u8]],
+        token_vault_signer_seeds: &[&[u8]],
+        rent: &Rent,
+        args: &CreateArgs, // Pass args by reference
+    ) -> ProgramResult {
+        msg!("Performing CPI calls (Helper function)...");
+
+        // Calculate required lamports for rent exemption
+        let mint_rent_lamports = rent.minimum_balance(spl_token::state::Mint::LEN);
+        let vault_rent_lamports = rent.minimum_balance(spl_token::state::Account::LEN);
+        // Define the maximum possible Borsh serialized size for the config
+        const MAX_CONFIG_SIZE: usize = 32 + 1 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 32 + 2 + 2 + 8 + (1 + 32) + (1 + 32); // 261 bytes
+        msg!("Using max config account size: {}", MAX_CONFIG_SIZE);
+        let config_rent_lamports = rent.minimum_balance(MAX_CONFIG_SIZE);
+
+        // 0. CPI: Create Config Account
+        msg!("Creating Config Account PDA...");
+        invoke_signed(
+            &system_instruction::create_account(
+                payer_creator_account.key,
+                config_account.key,
+                config_rent_lamports,
+                MAX_CONFIG_SIZE as u64, // Use MAX_CONFIG_SIZE
+                program_id,
+            ),
+            &[
+                payer_creator_account.clone(),
+                config_account.clone(),
+                system_program_account.clone(),
+            ],
+            &[config_signer_seeds],
+        )?;
+
+        // 1. CPI: Create SOL Vault Account
+        msg!("Creating SOL Vault PDA...");
+         invoke_signed(
+            &system_instruction::create_account(
+                payer_creator_account.key,
+                sol_vault_account.key,
+                vault_rent_lamports, 
+                0, 
+                program_id,
+            ),
+            &[
+                payer_creator_account.clone(),
+                sol_vault_account.clone(),
+                system_program_account.clone(),
+            ],
+            &[sol_vault_signer_seeds],
+        )?;
+
+        // 2. CPI: Create Token Mint Account
+        msg!("Creating Token Mint Account...");
+        invoke(
+            &system_instruction::create_account(
+                payer_creator_account.key,
+                token_mint_account.key,
+                mint_rent_lamports,
+                spl_token::state::Mint::LEN as u64,
+                token_program_account.key,
+            ),
+            &[
+                payer_creator_account.clone(),
+                token_mint_account.clone(),
+                system_program_account.clone(),
+            ],
+        )?;
+
+        // 3. CPI: Initialize Token Mint
+        msg!("Initializing Token Mint...");
+        let token_decimals = 6;
+        invoke_signed(
+            &token_instruction::initialize_mint(
+                token_program_account.key,
+                token_mint_account.key,
+                config_pda,
+                None,
+                token_decimals,
+            )?,
+            &[
+                token_mint_account.clone(),
+                rent_sysvar_account.clone(),
+                config_account.clone(),
+            ],
+            &[config_signer_seeds],
+        )?;
+
+        // 4. CPI: Create Token Vault Account
+        msg!("Creating Token Vault PDA...");
+        invoke_signed(
+            &system_instruction::create_account(
+                payer_creator_account.key,
+                token_vault_account.key,
+                vault_rent_lamports,
+                spl_token::state::Account::LEN as u64,
+                token_program_account.key,
+            ),
+            &[
+                payer_creator_account.clone(),
+                token_vault_account.clone(),
+                system_program_account.clone(),
+            ],
+            &[token_vault_signer_seeds],
+        )?;
+
+        // 5. CPI: Initialize Token Vault
+        msg!("Initializing Token Vault...");
+        invoke(
+            &token_instruction::initialize_account(
+                token_program_account.key,
+                token_vault_account.key,
+                token_mint_account.key,
+                config_pda,
+            )?,
+            &[
+                token_vault_account.clone(),
+                token_mint_account.clone(),
+                config_account.clone(),
+                rent_sysvar_account.clone(),
+                token_program_account.clone(),
+            ],
+        )?;
+
+        // 6. CPI: Mint Initial Tokens to Token Vault
+        msg!("Minting Initial Tokens...");
+        let initial_supply = 1_000_000_000_000; // TODO: Needs clarification if this should relate to virtual reserves
+        invoke_signed(
+            &token_instruction::mint_to(
+                token_program_account.key,
+                token_mint_account.key,
+                token_vault_account.key,
+                config_pda,
+                &[],
+                initial_supply,
+            )?,
+            &[
+                token_mint_account.clone(),
+                token_vault_account.clone(),
+                config_account.clone(),
+            ],
+             &[config_signer_seeds],
+        )?;
+
+        // 7. CPI: Create Metaplex Metadata Account
+        msg!("Creating Metaplex Metadata Account...");
+        invoke_signed(
+            &metadata_instruction::create_metadata_accounts_v3(
+                TOKEN_METADATA_PROGRAM_ID,
+                *metadata_account.key,
+                *token_mint_account.key,
+                *config_pda,
+                *payer_creator_account.key,
+                *config_pda,
+                args.name.clone(), // Clone strings from args reference
+                args.symbol.clone(),
+                args.metadata_uri.clone(),
+                None, 0, true, true, None, None, None,
+            ),
+            &[
+                metadata_account.clone(),
+                token_mint_account.clone(),
+                config_account.clone(),
+                payer_creator_account.clone(),
+                system_program_account.clone(),
+                rent_sysvar_account.clone(),
+                metadata_program_account.clone(),
+            ],
+            &[config_signer_seeds],
+        )?;
+
+        // State Initialization (At the end, using original args)
+        msg!("Initializing Bonding Curve Config state at END...");
+        let config_data = BondingCurveConfig {
+            authority: *payer_creator_account.key,
+            state: BondingCurveState::Active,
+            token_mint: *token_mint_account.key,
+            sol_vault: *sol_vault_account.key,
+            token_vault: *token_vault_account.key,
+            virtual_sol_reserves: args.initial_virtual_sol_reserves,
+            virtual_token_reserves: args.initial_virtual_token_reserves,
+            real_sol_reserves: 0,
+            total_supply_sold: 0,
+            creator: *payer_creator_account.key,
+            creation_fee_basis_points: args.creator_fee_basis_points,
+            trade_fee_basis_points: args.trade_fee_basis_points,
+            market_cap_threshold_sol: args.market_cap_threshold_sol,
+            raydium_pool_id: None,
+            openbook_market_id: None,
+        };
+        config_data.serialize(&mut *config_account.data.borrow_mut())?;
+
+        msg!("CreateTokenAndBondingCurve completed successfully.");
+        Ok(())
+    }
+
     /// Processes the CreateTokenAndBondingCurve instruction
     fn process_create_token_and_bonding_curve(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
-        args: CreateArgs,
+        args: CreateArgs, // Pass args by value here
     ) -> ProgramResult {
         msg!("Processing CreateTokenAndBondingCurve...");
 
@@ -151,7 +387,7 @@ impl Processor {
             &[b"token_vault", token_mint_account.key.as_ref()],
             program_id,
         );
-        let _token_vault_signer_seeds = &[b"token_vault", token_mint_account.key.as_ref(), &[token_vault_bump_seed]];
+        let token_vault_signer_seeds = &[b"token_vault", token_mint_account.key.as_ref(), &[token_vault_bump_seed]];
         
         // [X] Derive metadata PDA using Metaplex rules
         let (metadata_pda, _metadata_bump_seed) = Pubkey::find_program_address(
@@ -182,259 +418,26 @@ impl Processor {
             return Err(ProgramError::InvalidSeeds);
         }
 
-        // --- CPI Calls --- 
-        msg!("Performing CPI calls...");
-
-        // Calculate required lamports for rent exemption
-        let mint_rent_lamports = rent.minimum_balance(spl_token::state::Mint::LEN);
-        let vault_rent_lamports = rent.minimum_balance(spl_token::state::Account::LEN);
-        let _config_rent_lamports = rent.minimum_balance(BondingCurveConfig::MAX_SIZE); // Use size from state
-        // TODO: Calculate metadata_rent_lamports (Need metadata state size)
-
-        // [X] 1. CPI: Create SOL Vault Account (PDA)
-        msg!("Creating SOL Vault PDA...");
-        invoke_signed(
-            &system_instruction::create_account(
-                payer_creator_account.key,
-                sol_vault_account.key,
-                vault_rent_lamports, // Use vault size for SOL vault too
-                0, // No space needed for data in a native SOL account
-                program_id, // Owner must be the program itself for native SOL PDAs?
-                            // Check Solana docs - typically SystemProgram for non-PDA SOL accounts.
-                            // If owner is program, it can't easily sign transfers later.
-                            // Let's assume SystemProgram owner initially, like a regular wallet.
-                            // Revisit if direct program control over SOL PDA is needed.
-                            // Correction: If we want the *program* to sign transfers from this vault later,
-                            // the owner *must* be the program_id.
-                // &solana_program::system_program::id(),
-            ),
-            &[
-                payer_creator_account.clone(),
-                sol_vault_account.clone(),
-                system_program_account.clone(),
-            ],
-            &[sol_vault_signer_seeds], // Signer seeds for the PDA
+        // Call the helper function for CPIs
+        Self::create_and_initialize_accounts(
+            program_id,
+            payer_creator_account,
+            config_account,
+            token_mint_account,
+            sol_vault_account,
+            token_vault_account,
+            metadata_account,
+            system_program_account,
+            token_program_account,
+            metadata_program_account,
+            rent_sysvar_account,
+            &config_pda, // Pass derived PDA
+            config_signer_seeds,
+            sol_vault_signer_seeds,
+            token_vault_signer_seeds,
+            &rent,
+            &args, // Pass original args by reference to helper
         )?;
-
-        // [X] 2. CPI: Create Token Mint Account (Standard account, not PDA)
-        msg!("Creating Token Mint Account...");
-        invoke(
-            &system_instruction::create_account(
-                payer_creator_account.key,
-                token_mint_account.key,
-                mint_rent_lamports,
-                spl_token::state::Mint::LEN as u64,
-                token_program_account.key, // Owner is Token Program
-            ),
-            &[
-                payer_creator_account.clone(),
-                token_mint_account.clone(),
-                system_program_account.clone(),
-            ],
-        )?;
-
-        // [X] 3. CPI: Initialize Token Mint 
-        msg!("Initializing Token Mint...");
-        let token_decimals = 6; // Define token decimals (e.g., 6)
-        invoke_signed(
-            &token_instruction::initialize_mint(
-                token_program_account.key,
-                token_mint_account.key,
-                &config_pda, // Mint authority is the Config PDA
-                None, // Freeze authority (optional, set to None)
-                token_decimals,
-            )?,
-            &[
-                token_mint_account.clone(),
-                rent_sysvar_account.clone(), // Rent sysvar is required by initialize_mint
-                config_account.clone(), // Config PDA needs to be passed if it's the authority, even if only signing
-            ],
-            &[config_signer_seeds], // Config PDA signs as mint authority
-        )?;
-
-        // [X] 4. CPI: Create Token Vault Account (PDA)
-        msg!("Creating Token Vault PDA...");
-        invoke_signed(
-            &system_instruction::create_account(
-                payer_creator_account.key,
-                token_vault_account.key,
-                vault_rent_lamports, // Use vault size rent
-                spl_token::state::Account::LEN as u64, // Space for SPL Token Account
-                token_program_account.key, // Owner must be the Token Program for token accounts
-            ),
-            &[
-                payer_creator_account.clone(),
-                token_vault_account.clone(),
-                system_program_account.clone(),
-            ],
-            &[sol_vault_signer_seeds],
-        )?;
-
-        // [X] 5. CPI: Initialize Token Vault
-        msg!("Initializing Token Vault...");
-        invoke_signed(
-            &token_instruction::initialize_account(
-                token_program_account.key,
-                token_vault_account.key, // The account to initialize
-                token_mint_account.key, // The mint this account is associated with
-                &config_pda, // The owner of the tokens in this vault (Config PDA)
-            )?,
-            &[
-                token_vault_account.clone(),
-                token_mint_account.clone(),
-                config_account.clone(), // Config PDA is the owner
-                rent_sysvar_account.clone(), // Rent sysvar needed
-                token_program_account.clone(),
-            ],
-            &[config_signer_seeds], // Config PDA doesn't sign here, token vault PDA does via create_account?
-                                   // Correction: initialize_account doesn't need vault PDA sig.
-                                   // It establishes the *owner*, which is the config_pda.
-                                   // It seems no invoke_signed is strictly needed here if vault creation worked.
-                                   // Let's try standard invoke, assuming create_account set owner correctly.
-                                   // Revisit if ownership issues arise.
-                                   // Correction 2: The *account itself* is owned by Token Program.
-                                   // The authority over *tokens held within* is the config_pda.
-                                   // So `initialize_account` doesn't need PDA sigs.
-                                   // Let's try standard invoke, assuming create_account set owner correctly.
-                                   // Revisit if ownership issues arise.
-            // &[token_vault_signer_seeds] // No - vault PDA doesn't sign this
-        )?; 
-        // Re-evaluate: Using `invoke` directly instead of invoke_signed as Token Program handles initialization.
-        // invoke(
-        //     &token_instruction::initialize_account(
-        //         token_program_account.key,
-        //         token_vault_account.key,
-        //         token_mint_account.key,
-        //         &config_pda,
-        //     )?,
-        //     &[
-        //         token_vault_account.clone(),
-        //         token_mint_account.clone(),
-        //         config_account.clone(), // Owner
-        //         rent_sysvar_account.clone(),
-        //         token_program_account.clone(),
-        //     ],
-        // )?; 
-        // Final Decision: Sticking with original plan. The owner specified here is the authority
-        // over the tokens within the account. Standard `invoke` should work.
-        invoke(
-            &token_instruction::initialize_account(
-                token_program_account.key,
-                token_vault_account.key,
-                token_mint_account.key,
-                &config_pda, // Owner/Authority is the Config PDA
-            )?,
-            &[
-                token_vault_account.clone(),
-                token_mint_account.clone(),
-                config_account.clone(), // Authority account
-                rent_sysvar_account.clone(),
-                token_program_account.clone(), // Token program ID itself
-            ],
-        )?;
-
-        // [X] 6. CPI: Mint Initial Tokens to Token Vault
-        msg!("Minting Initial Tokens...");
-        // Example: 1 Million tokens with 6 decimals = 1,000,000 * 10^6
-        let initial_supply = 1_000_000_000_000;
-        invoke_signed(
-            &token_instruction::mint_to(
-                token_program_account.key,
-                token_mint_account.key, // Mint to mint tokens from
-                token_vault_account.key, // Destination token account (our vault)
-                &config_pda, // Mint authority (Config PDA)
-                &[], // Signer accounts - the authority is the PDA, passed via invoke_signed
-                initial_supply,
-            )?,
-            &[
-                token_mint_account.clone(),
-                token_vault_account.clone(),
-                config_account.clone(), // Mint authority account
-                token_program_account.clone(),
-            ],
-             &[config_signer_seeds], // Config PDA signs as mint authority
-        )?;
-
-        // [X] 7. CPI: Create Metaplex Metadata Account
-        msg!("Creating Metaplex Metadata Account...");
-        invoke_signed(
-            &metadata_instruction::create_metadata_accounts_v3(
-                TOKEN_METADATA_PROGRAM_ID,
-                *metadata_account.key, // Metadata account PDA key
-                *token_mint_account.key, // Mint account key
-                config_pda, // Mint authority (Config PDA)
-                *payer_creator_account.key, // Payer
-                config_pda, // Update authority (Config PDA)
-                args.name,
-                args.symbol,
-                args.metadata_uri,
-                None, // creators: Option<Vec<mpl_token_metadata::state::Creator>>
-                0, // seller_fee_basis_points
-                true, // update_authority_is_signer -> Config PDA needs to sign
-                true, // is_mutable
-                None, // collection: Option<mpl_token_metadata::state::Collection>
-                None, // uses: Option<mpl_token_metadata::state::Uses>
-                None, // collection_details: Option<mpl_token_metadata::state::CollectionDetails>
-            ),
-            &[
-                metadata_account.clone(),
-                token_mint_account.clone(),
-                config_account.clone(), // Mint authority & Update authority (Config PDA Account)
-                payer_creator_account.clone(), // Payer
-                system_program_account.clone(),
-                rent_sysvar_account.clone(),
-                metadata_program_account.clone(), // Metaplex program ID
-            ],
-            &[config_signer_seeds], // Config PDA needs to sign as update_authority and maybe mint_authority?
-                                    // V3 requires update_authority_is_signer = true, so PDA must sign.
-        )?;
-
-        // [X] 8. CPI: Transfer Creation Fee (Optional) - Skipping for MVP
-        // msg!("Transferring Creation Fee...");
-        // invoke(... system_instruction::transfer ...)
-
-        // --- State Initialization --- 
-        // [X] Initialize BondingCurveConfig struct with args and derived PDA pubkeys.
-        // [X] Serialize BondingCurveConfig state into the config_account data using borsh.
-        msg!("Initializing Bonding Curve Config state...");
-        
-        // Check if config account is already initialized (important safety check)
-        if !config_account.data_is_empty() {
-            msg!("Error: Config account already initialized");
-            return Err(ProgramError::AccountAlreadyInitialized);
-        }
-
-        // Ensure config account has enough space (should be allocated by client? Or via create_account CPI?)
-        // If PDAs are created by client, space needs to be allocated.
-        // If created via CPIs, space should be handled there.
-        // Let's assume client pre-allocates space for config_account PDA or we add a create_account CPI for it.
-        // For now, assuming space exists.
-
-        let config_data = BondingCurveConfig {
-            authority: *payer_creator_account.key, // Set initial authority to creator
-            state: BondingCurveState::Active,
-            token_mint: *token_mint_account.key,
-            sol_vault: sol_vault_pda,
-            token_vault: token_vault_pda,
-            virtual_sol_reserves: args.initial_virtual_sol,
-            virtual_token_reserves: args.initial_virtual_token,
-            real_sol_reserves: 0, // Vault starts empty
-            total_supply_sold: 0,
-            creator: *payer_creator_account.key,
-            creation_fee_basis_points: 0, // Example: No creation fee for now
-            trade_fee_basis_points: 100, // Example: 1% trade fee
-            market_cap_threshold_sol: args.market_cap_threshold_sol,
-            raydium_pool_id: None,
-            openbook_market_id: None,
-        };
-
-        // Check size before serialize (optional but good practice)
-        if config_account.data_len() < BondingCurveConfig::MAX_SIZE {
-            msg!("Error: Config account data length too small");
-            return Err(ProgramError::AccountDataTooSmall);
-        }
-
-        config_data.serialize(&mut *config_account.data.borrow_mut())?;
 
         msg!("CreateTokenAndBondingCurve completed successfully.");
         Ok(())

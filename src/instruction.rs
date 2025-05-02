@@ -9,8 +9,10 @@ pub struct CreateArgs {
     pub symbol: String,
     pub metadata_uri: String,
     pub market_cap_threshold_sol: u64,
-    pub initial_virtual_sol: u64,
-    pub initial_virtual_token: u64,
+    pub initial_virtual_sol_reserves: u64,
+    pub initial_virtual_token_reserves: u64,
+    pub trade_fee_basis_points: u16,
+    pub creator_fee_basis_points: u16,
     // Consider adding total_initial_supply if not fixed
 }
 
