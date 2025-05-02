@@ -1,4 +1,4 @@
-# ✨ Belac Token Launcher ✨
+# ✨ Belac Token Launcher v1.0 ✨
 
 A Solana smart contract for launching SPL tokens via a bonding curve mechanism, built with native Rust and SPL.
 
