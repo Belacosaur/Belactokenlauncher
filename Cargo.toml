@@ -1,0 +1,30 @@
+[package]
+name = "tokenlaunchcontract"
+version = "0.1.0"
+edition = "2018"
+license = "MIT"
+description = "Solana Token Launch Smart Contract"
+
+[dependencies]
+solana-program = "1.16.27"
+spl-token = { version = "3.5.0", features = ["no-entrypoint"] }
+mpl-token-metadata = { version = "1.2.5", features = ["no-entrypoint"] }
+borsh = "0.10.3"
+thiserror = "1.0.40"
+num-derive = "0.3.3"
+num-traits = "0.2.15"
+arrayref = "0.3.7"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+test-sbf = []
+
+[dev-dependencies]
+solana-program-test = "1.16.27"
+solana-sdk = "1.16.27"
+
+[profile.release]
+overflow-checks = true

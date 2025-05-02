@@ -1,0 +1,17 @@
+# Rust target directory
+/target
+
+# Lock file (optional, depends on policy)
+# Cargo.lock
+
+# Local keypairs (if any were stored directly here)
+*.json
+
+# Editor configuration files
+.idea/
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db 
+keypair
